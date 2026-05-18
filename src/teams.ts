@@ -13,51 +13,78 @@ function buildAdaptiveCard(summary: ClaudeSummary, repos: EnrichedRepo[], date: 
       type: "TextBlock",
       text: `🤖 Agent 日报 - ${date}`,
       weight: "bolder",
-      size: "large",
+      size: "medium",
     },
   ];
 
   if (explosiveSection.length > 0) {
-    body.push(
-      {
-        type: "TextBlock",
-        text: "🔥 暴涨速报",
-        weight: "bolder",
-        separator: true,
-      },
-      {
-        type: "FactSet",
-        facts: explosiveSection.map((r) => {
-          const ageDays = Math.floor((Date.now() - new Date(r.created_at).getTime()) / (1000 * 60 * 60 * 24));
-          return {
-            title: r.full_name,
-            value: `⭐${r.stargazers_count} (创建${ageDays}天, ${r.velocity.toFixed(0)}⭐/天) ${r.fireLevel}`,
-          };
-        }),
-      }
-    );
-  }
+    body.push({
+      type: "TextBlock",
+      text: "🔥 暴涨速报",
+      weight: "bolder",
+      separator: true,
+    });
 
-  const sections = splitSummary(summary.raw);
-
-  if (sections.top5) {
-    body.push(
-      {
+    for (const r of explosiveSection) {
+      const ageDays = Math.floor((Date.now() - new Date(r.created_at).getTime()) / (1000 * 60 * 60 * 24));
+      body.push({
         type: "TextBlock",
-        text: "⭐ Top 5 值得关注",
-        weight: "bolder",
-        separator: true,
-      },
-      {
-        type: "TextBlock",
-        text: sections.top5,
+        text: `[${r.full_name}](${r.html_url})  ⭐${r.stargazers_count} · 创建${ageDays}天 · ${r.velocity.toFixed(0)}⭐/天 · ${r.fireLevel}`,
         wrap: true,
-        size: "small",
-      }
-    );
+        spacing: "small",
+      });
+    }
   }
 
-  if (sections.trend) {
+  if (summary.top5.length > 0) {
+    body.push({
+      type: "TextBlock",
+      text: "⭐ Top 5 值得关注",
+      weight: "bolder",
+      separator: true,
+    });
+
+    for (const [index, item] of summary.top5.entries()) {
+      const repo = repos.find((candidate) => candidate.full_name === item.name);
+      if (!repo) {
+        continue;
+      }
+
+      body.push(
+        {
+          type: "TextBlock",
+          text: `${index + 1}. [${repo.full_name}](${repo.html_url})`,
+          weight: "bolder",
+          wrap: true,
+          spacing: "medium",
+        },
+        {
+          type: "TextBlock",
+          text: `${item.stars} · ${repo.language ?? "N/A"} · ${item.velocity} ${item.fireLevel}`,
+          wrap: true,
+          size: "small",
+          spacing: "none",
+          isSubtle: true,
+        },
+        {
+          type: "TextBlock",
+          text: item.tags ? `方向：${item.tags}` : "方向：待补充",
+          wrap: true,
+          size: "small",
+          spacing: "none",
+        },
+        {
+          type: "TextBlock",
+          text: `摘要：${item.summary}`,
+          wrap: true,
+          size: "small",
+          spacing: "none",
+        }
+      );
+    }
+  }
+
+  if (summary.trendObservation) {
     body.push(
       {
         type: "TextBlock",
@@ -67,49 +94,42 @@ function buildAdaptiveCard(summary: ClaudeSummary, repos: EnrichedRepo[], date: 
       },
       {
         type: "TextBlock",
-        text: sections.trend,
+        text: summary.trendObservation,
         wrap: true,
+        size: "small",
       }
     );
   }
+
+  body.push(
+    {
+      type: "TextBlock",
+      text: "🔗 快速访问",
+      weight: "bolder",
+      separator: true,
+    },
+    {
+      type: "TextBlock",
+      text: [`1. [GitHub Trending](https://github.com/trending)`, ...repos.slice(0, 5).map((repo, index) => `${index + 2}. [${repo.full_name}](${repo.html_url})`)].join("\n"),
+      wrap: true,
+      size: "small",
+    }
+  );
 
   return {
     type: "message",
     attachments: [
       {
         contentType: "application/vnd.microsoft.card.adaptive",
+        contentUrl: null,
         content: {
           type: "AdaptiveCard",
-          version: "1.4",
+          version: "1.2",
           $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
           body,
-          actions: [
-            {
-              type: "Action.OpenUrl",
-              title: "查看 GitHub Trending",
-              url: "https://github.com/trending",
-            },
-          ],
         },
       },
     ],
-  };
-}
-
-function splitSummary(raw: string): { top5: string; explosive: string; trend: string } {
-  const top5Match = raw.match(/## 任务1[\s\S]*?(?=## 任务2|$)/);
-  const explosiveMatch = raw.match(/## 任务2[\s\S]*?(?=## 任务3|$)/);
-  const trendMatch = raw.match(/## 任务3[\s\S]*$/);
-
-  const clean = (s: string | undefined) =>
-    (s ?? "")
-      .replace(/^## 任务\d[：:][^\n]*\n*/m, "")
-      .trim();
-
-  return {
-    top5: clean(top5Match?.[0]),
-    explosive: clean(explosiveMatch?.[0]),
-    trend: clean(trendMatch?.[0]),
   };
 }
 
@@ -128,8 +148,9 @@ export async function sendToTeams(
 
   const date = new Date().toISOString().slice(0, 10);
   const card = buildAdaptiveCard(summary, repos, date);
+  const payloadBytes = Buffer.byteLength(JSON.stringify(card), "utf8");
 
-  console.log("[Teams] Sending Adaptive Card...");
+  console.log(`[Teams] Sending Adaptive Card... (${payloadBytes} bytes)`);
 
   const res = await fetch(webhookUrl, {
     method: "POST",
@@ -142,5 +163,9 @@ export async function sendToTeams(
     throw new Error(`Teams webhook error (${res.status}): ${body}`);
   }
 
-  console.log("[Teams] Message sent successfully");
+  const workflowRunId = res.headers.get("x-ms-workflow-run-id");
+  const correlationId = res.headers.get("x-ms-correlation-id");
+  console.log(
+    `[Teams] Request accepted${workflowRunId ? ` (runId=${workflowRunId})` : ""}${correlationId ? ` correlationId=${correlationId}` : ""}`
+  );
 }
