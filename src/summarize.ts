@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { EnrichedRepo, ClaudeSummary, RepoSummaryItem } from "./types.js";
+import type { EnrichedRepo, ClaudeSummary, RadarContext, RepoSummaryItem, TrendingRepo } from "./types.js";
 
 const MODEL = "claude-sonnet-4-5@20250929";
 
@@ -7,6 +7,8 @@ interface ModelSummaryItem {
   name?: string;
   tags?: string[] | string;
   summary?: string;
+  whyNow?: string;
+  linkedSignal?: string;
 }
 
 interface ModelSummaryResponse {
@@ -15,7 +17,14 @@ interface ModelSummaryResponse {
   trendObservation?: string[] | string;
 }
 
-function buildPrompt(repos: EnrichedRepo[]): string {
+function buildPrompt(repos: EnrichedRepo[], trendingRepos: TrendingRepo[], radarContext?: RadarContext): string {
+  const trendingList = trendingRepos
+    .map(
+      (repo, index) =>
+        `${index + 1}. ${repo.fullName} | lang:${repo.language ?? "N/A"} | dailyStars:${repo.dailyStars ?? "N/A"} | ${repo.description}`
+    )
+    .join("\n");
+
   const repoList = repos
     .map((r) => {
       const ageDays = Math.floor((Date.now() - new Date(r.created_at).getTime()) / (1000 * 60 * 60 * 24));
@@ -24,14 +33,32 @@ function buildPrompt(repos: EnrichedRepo[]): string {
       const contributors = qc ? `contributors:${qc.contributors}` : "";
       return [
         `${r.full_name} | ⭐${r.stargazers_count} | 创建:${ageDays}天前 | 增速:${r.velocity.toFixed(1)}/天 ${r.fireLevel}`,
-        `  ${commits} ${contributors} | lang:${r.language ?? "N/A"} | ${r.description ?? ""}`,
+        `  ${commits} ${contributors} | lang:${r.language ?? "N/A"} | radarBoost:${r.radarBoost.toFixed(1)} | signal:${r.matchedSignal?.label ?? "N/A"} | ${r.description ?? ""}`,
+        `  readme:${r.readmeSnippet ?? "N/A"}`,
       ].join("\n");
     })
     .join("\n\n");
 
+  const radarSection = radarContext
+    ? `
+
+今日外部新闻雷达：
+- 总览：${radarContext.overview}
+- 重点信号：
+${radarContext.topSignals
+  .map(
+    (signal, index) =>
+      `  ${index + 1}. ${signal.label} (${signal.count}条) | 示例: ${signal.sampleTitle} | 来源: ${signal.siteName}/${signal.source}`
+  )
+  .join("\n")}
+- 覆盖健康：${radarContext.sourceHealth.successfulSites}/${radarContext.sourceHealth.totalSites} 个源可用，AI精选 ${radarContext.sourceHealth.aiItems} 条，原始信号 ${radarContext.sourceHealth.rawItems} 条`
+    : "";
+
   return `你是一个 AI Agent 技术趋势分析师。
 
-请从以下仓库中选出最值得关注的 5 个，并总结今天的趋势。
+请同时回答两个问题：
+1. 即时性：GitHub Trending 前五个项目和当日增星最快的项目，今天最值得立刻关注什么。
+2. 趋势和大环境：结合外部新闻雷达，今天 AI Agent / coding / model 生态正在往哪里走。
 优先关注以下方向（如果有的话）：
 - 🧠 非传统 agent 架构（非 ReAct/CoT 的新范式）
 - 🤝 多 agent 编排（multi-agent orchestration）
@@ -47,7 +74,9 @@ JSON 结构如下：
     {
       "name": "owner/repo",
       "tags": ["方向标签1", "方向标签2"],
-      "summary": "一句中文总结，不超过30字"
+      "summary": "一句中文总结，不超过30字",
+      "whyNow": "为什么它和今天的外部世界相关，不超过40字",
+      "linkedSignal": "它对应的新闻信号名称"
     }
   ],
   "explosiveRepos": [
@@ -64,13 +93,20 @@ JSON 结构如下：
 }
 
 要求：
-1. top5 必须正好返回 5 个仓库。
+1. top5 必须正好返回 5 个仓库，并且优先使用下方 GitHub Trending 前五的 full_name；如果 Trending 前五里某个仓库没有出现在候选仓库池里，也可以照样输出它。
 2. name 必须严格使用下方仓库列表里的 full_name，不能改写。
 3. tags 使用简短中文或英文短语即可。
 4. 如果没有暴涨仓库，explosiveRepos 返回空数组。
-5. trendObservation 返回 2-3 句，聚焦整体技术方向变化。
+5. trendObservation 返回 2-3 句，聚焦整体技术方向变化，而不是重复列项目。
+6. 优先把 repo 与今日外部新闻雷达里的信号做关联，而不是只看 GitHub 星数。
+7. top5 负责回答“即时性”；trendObservation 负责回答“趋势和大环境”。
 
 ---
+
+${radarSection}
+
+GitHub Trending 前五：
+${trendingList}
 
 仓库列表：
 
@@ -108,12 +144,33 @@ function toSummaryItem(repo: EnrichedRepo, item?: ModelSummaryItem): RepoSummary
     fireLevel: repo.fireLevel,
     tags: normalizeTags(item?.tags),
     summary: item?.summary?.trim() || repo.description?.trim() || "近期热度较高，值得继续跟踪。",
+    whyNow: item?.whyNow?.trim() || (repo.matchedSignal ? `命中今日外部信号 ${repo.matchedSignal.label}` : "与今天的 AI 开发和工具生态变化相关。"),
+    linkedSignal: item?.linkedSignal?.trim() || repo.matchedSignal?.label,
+    linkedSignalHeadline: repo.matchedHeadline,
+    linkedSignalUrl: repo.matchedSignal?.sampleUrl,
+    radarBoost: repo.radarBoost > 0 ? `+${repo.radarBoost.toFixed(1)}` : undefined,
   };
 }
 
-function buildFallbackSummary(repos: EnrichedRepo[], raw: string): ClaudeSummary {
+function buildFallbackSummary(repos: EnrichedRepo[], trendingRepos: TrendingRepo[], raw: string): ClaudeSummary {
+  const repoByName = new Map(repos.map((repo) => [repo.full_name, repo]));
+
   return {
-    top5: repos.slice(0, 5).map((repo) => toSummaryItem(repo)),
+    top5: trendingRepos.slice(0, 5).map((repo) => {
+      const enriched = repoByName.get(repo.fullName);
+      return enriched
+        ? { ...toSummaryItem(enriched), dailyStars: repo.dailyStars !== null ? `+${repo.dailyStars}` : undefined }
+        : {
+            name: repo.fullName,
+            stars: "Trending",
+            velocity: repo.dailyStars !== null ? `+${repo.dailyStars}/day` : "N/A",
+            fireLevel: "",
+            tags: repo.language ?? "Trending",
+            summary: repo.description || "今日 GitHub Trending 热门项目。",
+            whyNow: "今日 GitHub Trending 前五项目。",
+            dailyStars: repo.dailyStars !== null ? `+${repo.dailyStars}` : undefined,
+          };
+    }),
     explosiveRepos: repos
       .filter((repo) => {
         const ageDays = (Date.now() - new Date(repo.created_at).getTime()) / (1000 * 60 * 60 * 24);
@@ -126,8 +183,15 @@ function buildFallbackSummary(repos: EnrichedRepo[], raw: string): ClaudeSummary
   };
 }
 
-function parseSummary(raw: string, repos: EnrichedRepo[]): ClaudeSummary {
+function parseSummary(
+  raw: string,
+  repos: EnrichedRepo[],
+  trendingRepos: TrendingRepo[],
+  radarContext?: RadarContext
+): ClaudeSummary {
   const repoMap = new Map(repos.map((repo) => [repo.full_name.toLowerCase(), repo]));
+  const signalMap = new Map((radarContext?.topSignals ?? []).map((signal) => [signal.label.toLowerCase(), signal]));
+  const trendingMap = new Map(trendingRepos.map((repo) => [repo.fullName.toLowerCase(), repo]));
 
   try {
     const parsed = JSON.parse(extractJson(raw)) as ModelSummaryResponse;
@@ -135,7 +199,32 @@ function parseSummary(raw: string, repos: EnrichedRepo[]): ClaudeSummary {
     const top5 = (parsed.top5 ?? [])
       .map((item) => {
         const repo = item.name ? repoMap.get(item.name.toLowerCase()) : undefined;
-        return repo ? toSummaryItem(repo, item) : null;
+        const trendingRepo = item.name ? trendingMap.get(item.name.toLowerCase()) : undefined;
+        if (!repo && !trendingRepo) {
+          return null;
+        }
+
+        const summaryItem = repo
+          ? toSummaryItem(repo, item)
+          : {
+              name: trendingRepo!.fullName,
+              stars: "Trending",
+              velocity: trendingRepo!.dailyStars !== null ? `+${trendingRepo!.dailyStars}/day` : "N/A",
+              fireLevel: "",
+              tags: normalizeTags(item?.tags) || trendingRepo!.language || "Trending",
+              summary: item?.summary?.trim() || trendingRepo!.description || "今日 GitHub Trending 热门项目。",
+              whyNow: item?.whyNow?.trim() || "今日 GitHub Trending 前五项目。",
+              linkedSignal: item?.linkedSignal?.trim(),
+              dailyStars: trendingRepo!.dailyStars !== null ? `+${trendingRepo!.dailyStars}` : undefined,
+            };
+        const linkedSignal = summaryItem.linkedSignal ? signalMap.get(summaryItem.linkedSignal.toLowerCase()) : undefined;
+        if (linkedSignal) {
+          summaryItem.linkedSignal = linkedSignal.label;
+          summaryItem.linkedSignalHeadline = linkedSignal.sampleTitle;
+          summaryItem.linkedSignalUrl = linkedSignal.sampleUrl;
+        }
+
+        return summaryItem;
       })
       .filter((item): item is RepoSummaryItem => item !== null)
       .slice(0, 5);
@@ -153,22 +242,53 @@ function parseSummary(raw: string, repos: EnrichedRepo[]): ClaudeSummary {
       : parsed.trendObservation?.trim() ?? "";
 
     if (top5.length === 0) {
-      return buildFallbackSummary(repos, raw);
+      return buildFallbackSummary(repos, trendingRepos, raw);
+    }
+
+    const filledTop5 = [...top5];
+    for (const trendingRepo of trendingRepos) {
+      if (filledTop5.length >= 5) {
+        break;
+      }
+
+      if (filledTop5.some((item) => item.name === trendingRepo.fullName)) {
+        continue;
+      }
+
+      const enriched = repoMap.get(trendingRepo.fullName.toLowerCase());
+      filledTop5.push(
+        enriched
+          ? { ...toSummaryItem(enriched), dailyStars: trendingRepo.dailyStars !== null ? `+${trendingRepo.dailyStars}` : undefined }
+          : {
+              name: trendingRepo.fullName,
+              stars: "Trending",
+              velocity: trendingRepo.dailyStars !== null ? `+${trendingRepo.dailyStars}/day` : "N/A",
+              fireLevel: "",
+              tags: trendingRepo.language ?? "Trending",
+              summary: trendingRepo.description || "今日 GitHub Trending 热门项目。",
+              whyNow: "今日 GitHub Trending 前五项目。",
+              dailyStars: trendingRepo.dailyStars !== null ? `+${trendingRepo.dailyStars}` : undefined,
+            }
+      );
     }
 
     return {
-      top5: top5.length === 5 ? top5 : [...top5, ...repos.filter((repo) => !top5.some((item) => item.name === repo.full_name)).slice(0, 5 - top5.length).map((repo) => toSummaryItem(repo))],
+      top5: filledTop5.slice(0, 5),
       explosiveRepos,
       trendObservation: trendObservation || "今日热度仍集中在 Agent 框架、开发工作流和工具调用能力。",
       raw,
     };
   } catch (error) {
     console.warn(`[Claude] Failed to parse JSON summary, falling back to ranked repos: ${String(error)}`);
-    return buildFallbackSummary(repos, raw);
+    return buildFallbackSummary(repos, trendingRepos, raw);
   }
 }
 
-export async function summarize(repos: EnrichedRepo[]): Promise<ClaudeSummary> {
+export async function summarize(
+  repos: EnrichedRepo[],
+  trendingRepos: TrendingRepo[],
+  radarContext?: RadarContext
+): Promise<ClaudeSummary> {
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY environment variable is required");
@@ -182,7 +302,7 @@ export async function summarize(repos: EnrichedRepo[]): Promise<ClaudeSummary> {
   }
 
   const client = new Anthropic({ apiKey, ...(baseURL && { baseURL }) });
-  const prompt = buildPrompt(repos);
+  const prompt = buildPrompt(repos, trendingRepos, radarContext);
 
   console.log(`[Claude] Sending ${repos.length} repos for summarization...`);
   console.log(`[Claude] Base URL: ${client.baseURL}`);
@@ -200,5 +320,5 @@ export async function summarize(repos: EnrichedRepo[]): Promise<ClaudeSummary> {
 
   console.log(`[Claude] Summary generated (${raw.length} chars)`);
 
-  return parseSummary(raw, repos);
+  return parseSummary(raw, repos, trendingRepos, radarContext);
 }

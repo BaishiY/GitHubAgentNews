@@ -46,6 +46,19 @@ export function getYesterdayStars(repoName: string, snapshot: StarsSnapshot): nu
   return snapshot[yesterday]?.[repoName] ?? null;
 }
 
+export function getDailyStarDelta(
+  repoName: string,
+  currentStars: number,
+  snapshot: StarsSnapshot
+): number | null {
+  const yesterdayStars = getYesterdayStars(repoName, snapshot);
+  if (yesterdayStars === null) {
+    return null;
+  }
+
+  return currentStars - yesterdayStars;
+}
+
 export function getAcceleration(
   repoName: string,
   currentStars: number,

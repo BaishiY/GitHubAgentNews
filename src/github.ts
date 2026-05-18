@@ -1,4 +1,7 @@
 import type { RepoInfo, SearchGroup, SearchGroupConfig, QualityCheck } from "./types.js";
+import { buildDynamicSearchQuery } from "./radar.js";
+
+type SearchResultItem = { repo: RepoInfo; sources: SearchGroup[]; qualityCheck?: QualityCheck; readmeSnippet?: string };
 
 const GITHUB_API = "https://api.github.com";
 const token = process.env.GITHUB_TOKEN ?? "";
@@ -15,11 +18,11 @@ function formatDate(daysAgo: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-function buildSearchGroups(): SearchGroupConfig[] {
+function buildSearchGroups(dynamicTerms: string[] = []): SearchGroupConfig[] {
   const yesterday = formatDate(1);
   const thirtyDaysAgo = formatDate(30);
 
-  return [
+  const groups: SearchGroupConfig[] = [
     {
       group: "A",
       query: `(agent OR ai-agent OR autonomous-agent) in:name,description,topics pushed:>${yesterday} stars:>100`,
@@ -49,6 +52,19 @@ function buildSearchGroups(): SearchGroupConfig[] {
       perPage: 50,
     },
   ];
+
+  const dynamicQuery = buildDynamicSearchQuery(dynamicTerms);
+  if (dynamicQuery) {
+    groups.push({
+      group: "R",
+      query: dynamicQuery,
+      minStars: 80,
+      useCreatedDate: false,
+      perPage: 30,
+    });
+  }
+
+  return groups;
 }
 
 async function searchRepos(config: SearchGroupConfig): Promise<{ group: SearchGroup; repos: RepoInfo[] }> {
@@ -123,6 +139,22 @@ export async function checkQuality(repo: RepoInfo): Promise<QualityCheck> {
   };
 }
 
+async function fetchReadmeSnippet(repo: RepoInfo): Promise<string | undefined> {
+  const res = await fetch(`${GITHUB_API}/repos/${repo.full_name}/readme`, {
+    headers: {
+      ...headers,
+      Accept: "application/vnd.github.raw+json",
+    },
+  });
+
+  if (!res.ok) {
+    return undefined;
+  }
+
+  const text = (await res.text()).replace(/[#>*_`\-\[\]\(\)!]/g, " ").replace(/\s+/g, " ").trim();
+  return text.slice(0, 400) || undefined;
+}
+
 function passesQualityCheck(qc: QualityCheck, repo: RepoInfo): boolean {
   return (
     qc.commits >= 10 &&
@@ -133,8 +165,8 @@ function passesQualityCheck(qc: QualityCheck, repo: RepoInfo): boolean {
   );
 }
 
-export async function searchAllGroups(): Promise<{ repo: RepoInfo; sources: SearchGroup[]; qualityCheck?: QualityCheck }[]> {
-  const configs = buildSearchGroups();
+export async function searchAllGroups(dynamicTerms: string[] = []): Promise<SearchResultItem[]> {
+  const configs = buildSearchGroups(dynamicTerms);
 
   const results = [];
   for (const config of configs) {
@@ -145,20 +177,21 @@ export async function searchAllGroups(): Promise<{ repo: RepoInfo; sources: Sear
   const merged = dedupeAndFilter(results);
   console.log(`[Dedup] ${merged.length} unique repos after filtering`);
 
-  const output: { repo: RepoInfo; sources: SearchGroup[]; qualityCheck?: QualityCheck }[] = [];
+  const output: SearchResultItem[] = [];
 
   for (const item of merged) {
     const isGroupD = item.sources.includes("D");
 
     if (isGroupD) {
-      const qc = await checkQuality(item.repo);
+      const [qc, readmeSnippet] = await Promise.all([checkQuality(item.repo), fetchReadmeSnippet(item.repo)]);
       if (passesQualityCheck(qc, item.repo)) {
-        output.push({ ...item, qualityCheck: qc });
+        output.push({ ...item, qualityCheck: qc, readmeSnippet });
       } else {
         console.log(`[Quality] Filtered out ${item.repo.full_name} (empty/low-quality)`);
       }
     } else {
-      output.push(item);
+      const readmeSnippet = await fetchReadmeSnippet(item.repo);
+      output.push({ ...item, readmeSnippet });
     }
   }
 

@@ -1,4 +1,5 @@
-import type { RepoInfo, EnrichedRepo, QualityCheck, SearchGroup, StarsSnapshot } from "./types.js";
+import type { RepoInfo, EnrichedRepo, QualityCheck, RadarContext, SearchGroup, StarsSnapshot } from "./types.js";
+import { matchRepoToRadar } from "./radar.js";
 import { getAcceleration } from "./snapshot.js";
 
 export function calculateVelocity(repo: RepoInfo): number {
@@ -18,6 +19,7 @@ function calculateScore(
   repo: RepoInfo,
   velocity: number,
   acceleration: number | null,
+  radarBoost: number,
   qualityCheck?: QualityCheck
 ): number {
   const baseScore = repo.stargazers_count * 0.2;
@@ -42,18 +44,21 @@ function calculateScore(
     (ageDays < 30 ? 10 : 0) +
     (pushedHoursAgo < 24 ? 5 : 0);
 
-  return baseScore + qualityScore + trendScore;
+  return baseScore + qualityScore + trendScore + radarBoost;
 }
 
 export function enrichAndRank(
-  repos: { repo: RepoInfo; sources: SearchGroup[]; qualityCheck?: QualityCheck }[],
+  repos: { repo: RepoInfo; sources: SearchGroup[]; qualityCheck?: QualityCheck; readmeSnippet?: string }[],
   snapshot: StarsSnapshot,
+  radarContext?: RadarContext,
   topN = 20
 ): EnrichedRepo[] {
-  const enriched: EnrichedRepo[] = repos.map(({ repo, sources, qualityCheck }) => {
+  const enriched: EnrichedRepo[] = repos.map(({ repo, sources, qualityCheck, readmeSnippet }) => {
     const velocity = calculateVelocity(repo);
     const acceleration = getAcceleration(repo.full_name, repo.stargazers_count, snapshot);
-    const score = calculateScore(repo, velocity, acceleration, qualityCheck);
+    const radarMatch = matchRepoToRadar(repo, radarContext, readmeSnippet);
+    const radarBoost = Math.min(radarMatch.score, 24);
+    const score = calculateScore(repo, velocity, acceleration, radarBoost, qualityCheck);
 
     return {
       ...repo,
@@ -61,6 +66,11 @@ export function enrichAndRank(
       velocity,
       acceleration,
       score,
+      radarBoost,
+      radarMatchScore: radarMatch.score,
+      matchedSignal: radarMatch.signal,
+      matchedHeadline: radarMatch.headline,
+      readmeSnippet,
       fireLevel: getFireLevel(velocity),
       qualityCheck,
     };

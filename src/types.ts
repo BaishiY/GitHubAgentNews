@@ -15,13 +15,18 @@ export interface RepoInfo {
   topics: string[];
 }
 
-export type SearchGroup = "A" | "B" | "C" | "D";
+export type SearchGroup = "A" | "B" | "C" | "D" | "R";
 
 export interface EnrichedRepo extends RepoInfo {
   source: SearchGroup[];
   velocity: number;
   acceleration: number | null;
   score: number;
+  radarBoost: number;
+  radarMatchScore: number;
+  matchedSignal?: RadarSignal;
+  matchedHeadline?: string;
+  readmeSnippet?: string;
   fireLevel: string;
   qualityCheck?: QualityCheck;
 }
@@ -46,6 +51,12 @@ export interface RepoSummaryItem {
   fireLevel: string;
   tags: string;
   summary: string;
+  whyNow?: string;
+  linkedSignal?: string;
+  linkedSignalUrl?: string;
+  linkedSignalHeadline?: string;
+  radarBoost?: string;
+  dailyStars?: string;
 }
 
 export interface ClaudeSummary {
@@ -53,6 +64,46 @@ export interface ClaudeSummary {
   explosiveRepos: RepoSummaryItem[];
   trendObservation: string;
   raw: string;
+}
+
+export interface TrendingRepo {
+  fullName: string;
+  htmlUrl: string;
+  description: string;
+  language: string | null;
+  dailyStars: number | null;
+}
+
+export interface RadarSignal {
+  id: string;
+  label: string;
+  count: number;
+  searchTerms: string[];
+  sampleTitle: string;
+  sampleUrl: string;
+  siteName: string;
+  source: string;
+}
+
+export interface RadarTopSite {
+  siteId: string;
+  siteName: string;
+  count: number;
+}
+
+export interface RadarContext {
+  generatedAt: string;
+  overview: string;
+  dynamicSearchTerms: string[];
+  topSignals: RadarSignal[];
+  topSites: RadarTopSite[];
+  sourceHealth: {
+    successfulSites: number;
+    totalSites: number;
+    failedSites: string[];
+    aiItems: number;
+    rawItems: number;
+  };
 }
 
 export interface SearchGroupConfig {
