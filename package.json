@@ -1,0 +1,18 @@
+{
+  "name": "github-agent-news",
+  "version": "1.0.0",
+  "description": "Daily GitHub Agent trending repos digest → Teams",
+  "type": "module",
+  "scripts": {
+    "report": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  }
+}
