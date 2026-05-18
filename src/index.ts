@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { searchAllGroups } from "./github.js";
 import { enrichAndRank } from "./scorer.js";
 import { loadSnapshot, saveSnapshot } from "./snapshot.js";

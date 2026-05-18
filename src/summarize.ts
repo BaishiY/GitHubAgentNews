@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { EnrichedRepo, ClaudeSummary } from "./types.js";
 
-const MODEL = "claude-sonnet-4-6-20250514";
+const MODEL = "claude-sonnet-4-5@20250929";
 
 function buildPrompt(repos: EnrichedRepo[]): string {
   const repoList = repos
@@ -53,7 +53,8 @@ export async function summarize(repos: EnrichedRepo[]): Promise<ClaudeSummary> {
     throw new Error("ANTHROPIC_API_KEY environment variable is required");
   }
 
-  const client = new Anthropic({ apiKey });
+  const baseURL = process.env.ANTHROPIC_BASE_URL;
+  const client = new Anthropic({ apiKey, ...(baseURL && { baseURL }) });
   const prompt = buildPrompt(repos);
 
   console.log(`[Claude] Sending ${repos.length} repos for summarization...`);
