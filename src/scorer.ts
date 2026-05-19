@@ -1,11 +1,35 @@
 import type { RepoInfo, EnrichedRepo, QualityCheck, RadarContext, SearchGroup, StarsSnapshot } from "./types.js";
 import { matchRepoToRadar } from "./radar.js";
-import { getAcceleration } from "./snapshot.js";
+import { getAcceleration, getDailyStarDelta } from "./snapshot.js";
 
 export function calculateVelocity(repo: RepoInfo): number {
+  return calculateLifetimeVelocity(repo);
+}
+
+function calculateLifetimeVelocity(repo: RepoInfo): number {
   const created = new Date(repo.created_at).getTime();
   const ageDays = Math.max(1, (Date.now() - created) / (1000 * 60 * 60 * 24));
   return repo.stargazers_count / ageDays;
+}
+
+function getTrendVelocity(
+  repo: RepoInfo,
+  snapshot: StarsSnapshot
+): { velocity: number; velocitySource: "snapshot" | "lifetime"; dailyStarsDelta: number | null } {
+  const dailyStarsDelta = getDailyStarDelta(repo.full_name, repo.stargazers_count, snapshot);
+  if (dailyStarsDelta !== null && dailyStarsDelta >= 0) {
+    return {
+      velocity: dailyStarsDelta,
+      velocitySource: "snapshot",
+      dailyStarsDelta,
+    };
+  }
+
+  return {
+    velocity: calculateLifetimeVelocity(repo),
+    velocitySource: "lifetime",
+    dailyStarsDelta: null,
+  };
 }
 
 export function getFireLevel(velocity: number): string {
@@ -54,7 +78,7 @@ export function enrichAndRank(
   topN = 20
 ): EnrichedRepo[] {
   const enriched: EnrichedRepo[] = repos.map(({ repo, sources, qualityCheck, readmeSnippet }) => {
-    const velocity = calculateVelocity(repo);
+    const { velocity, velocitySource, dailyStarsDelta } = getTrendVelocity(repo, snapshot);
     const acceleration = getAcceleration(repo.full_name, repo.stargazers_count, snapshot);
     const radarMatch = matchRepoToRadar(repo, radarContext, readmeSnippet);
     const radarBoost = Math.min(radarMatch.score, 24);
@@ -64,6 +88,8 @@ export function enrichAndRank(
       ...repo,
       source: sources,
       velocity,
+      velocitySource,
+      dailyStarsDelta,
       acceleration,
       score,
       radarBoost,

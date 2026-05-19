@@ -41,8 +41,8 @@ export async function saveSnapshot(repos: RepoInfo[], existing: StarsSnapshot): 
 
 export function getYesterdayStars(repoName: string, snapshot: StarsSnapshot): number | null {
   const dates = Object.keys(snapshot).sort();
-  if (dates.length < 2) return null;
-  const yesterday = dates[dates.length - 2];
+  if (dates.length < 1) return null;
+  const yesterday = dates[dates.length - 1];
   return snapshot[yesterday]?.[repoName] ?? null;
 }
 
@@ -67,14 +67,13 @@ export function getAcceleration(
   const dates = Object.keys(snapshot).sort();
   if (dates.length < 2) return null;
 
-  const prevDate = dates[dates.length - 2];
+  const prevDate = dates[dates.length - 1];
   const prevStars = snapshot[prevDate]?.[repoName];
   if (prevStars === undefined) return null;
 
   const todayDelta = currentStars - prevStars;
 
-  if (dates.length < 3) return null;
-  const prevPrevDate = dates[dates.length - 3];
+  const prevPrevDate = dates[dates.length - 2];
   const prevPrevStars = snapshot[prevPrevDate]?.[repoName];
   if (prevPrevStars === undefined) return null;
 

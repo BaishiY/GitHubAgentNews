@@ -79,7 +79,8 @@ GET /search/repositories
 ├── size ≥ 100 KB             // 排除无实际代码
 ├── open_issues > 0           // 有真实社区互动
 ├── forks ≥ 5                 // 有人在用
-└── contributors ≥ 2          // 非单人刷星项目
+├── contributors ≥ 2          // 非单人刷星项目
+└── 最近 commit < 7天         // 近期仍在开发
 
 可选加强（额外 API 调用）：
 ├── GET /repos/{owner}/{repo}/languages
@@ -114,7 +115,13 @@ trend_score:
 ### 4.1 增速计算
 
 ```
-velocity = stars / repo_age_days       // 日均增星数
+优先使用最近一天真实增星：
+
+velocity = today_stars - yesterday_stars
+
+如果历史快照不足，再降级为：
+
+velocity = stars / repo_age_days       // 生命周期平均日增星
 
 爆发等级：
   🔥🔥🔥 velocity > 100     "爆发增长"
@@ -144,7 +151,7 @@ velocity = stars / repo_age_days       // 日均增星数
 
 ### 5.1 模型选择
 
-`claude-sonnet-4-6-20250514`（性价比最佳）
+默认使用 `claude-sonnet-4-6@default`，也支持通过 `ANTHROPIC_MODEL` 环境变量覆盖。
 
 ### 5.2 Prompt
 

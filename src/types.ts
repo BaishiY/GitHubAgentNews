@@ -20,6 +20,8 @@ export type SearchGroup = "A" | "B" | "C" | "D" | "R";
 export interface EnrichedRepo extends RepoInfo {
   source: SearchGroup[];
   velocity: number;
+  velocitySource: "snapshot" | "lifetime";
+  dailyStarsDelta: number | null;
   acceleration: number | null;
   score: number;
   radarBoost: number;

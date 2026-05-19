@@ -1,7 +1,18 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { EnrichedRepo, ClaudeSummary, RadarContext, RepoSummaryItem, TrendingRepo } from "./types.js";
 
-const MODEL = "claude-sonnet-4-5@20250929";
+const DEFAULT_MODEL = "claude-sonnet-4-6@default";
+
+interface AnthropicClientLike {
+  baseURL?: string;
+  messages: {
+    create(args: {
+      model: string;
+      max_tokens: number;
+      messages: Array<{ role: "user"; content: string }>;
+    }): Promise<{ content: Array<{ type: string; text?: string }> }>;
+  };
+}
 
 interface ModelSummaryItem {
   name?: string;
@@ -113,7 +124,7 @@ ${trendingList}
 ${repoList}`;
 }
 
-function extractJson(text: string): string {
+export function extractJson(text: string): string {
   const fenced = text.match(/```json\s*([\s\S]*?)```/i) ?? text.match(/```\s*([\s\S]*?)```/);
   if (fenced?.[1]) {
     return fenced[1].trim();
@@ -149,6 +160,7 @@ function toSummaryItem(repo: EnrichedRepo, item?: ModelSummaryItem): RepoSummary
     linkedSignalHeadline: repo.matchedHeadline,
     linkedSignalUrl: repo.matchedSignal?.sampleUrl,
     radarBoost: repo.radarBoost > 0 ? `+${repo.radarBoost.toFixed(1)}` : undefined,
+    dailyStars: repo.dailyStarsDelta !== null ? `+${repo.dailyStarsDelta}` : undefined,
   };
 }
 
@@ -183,7 +195,7 @@ function buildFallbackSummary(repos: EnrichedRepo[], trendingRepos: TrendingRepo
   };
 }
 
-function parseSummary(
+export function parseSummary(
   raw: string,
   repos: EnrichedRepo[],
   trendingRepos: TrendingRepo[],
@@ -196,7 +208,7 @@ function parseSummary(
   try {
     const parsed = JSON.parse(extractJson(raw)) as ModelSummaryResponse;
 
-    const top5 = (parsed.top5 ?? [])
+    const top5Items: Array<RepoSummaryItem | null> = (parsed.top5 ?? [])
       .map((item) => {
         const repo = item.name ? repoMap.get(item.name.toLowerCase()) : undefined;
         const trendingRepo = item.name ? trendingMap.get(item.name.toLowerCase()) : undefined;
@@ -204,8 +216,15 @@ function parseSummary(
           return null;
         }
 
-        const summaryItem = repo
-          ? toSummaryItem(repo, item)
+        const repoSummary = repo ? toSummaryItem(repo, item) : null;
+        const summaryItem: RepoSummaryItem = repoSummary
+          ? {
+              ...repoSummary,
+              dailyStars:
+                trendingRepo?.dailyStars !== null && trendingRepo?.dailyStars !== undefined
+                  ? `+${trendingRepo.dailyStars}`
+                  : repoSummary.dailyStars,
+            }
           : {
               name: trendingRepo!.fullName,
               stars: "Trending",
@@ -225,17 +244,17 @@ function parseSummary(
         }
 
         return summaryItem;
-      })
-      .filter((item): item is RepoSummaryItem => item !== null)
-      .slice(0, 5);
+      });
 
-    const explosiveRepos = (parsed.explosiveRepos ?? [])
+    const top5 = top5Items.filter((item): item is RepoSummaryItem => item !== null).slice(0, 5);
+
+    const explosiveRepoItems: Array<RepoSummaryItem | null> = (parsed.explosiveRepos ?? [])
       .map((item) => {
         const repo = item.name ? repoMap.get(item.name.toLowerCase()) : undefined;
         return repo ? toSummaryItem(repo, item) : null;
-      })
-      .filter((item): item is RepoSummaryItem => item !== null)
-      .slice(0, 3);
+      });
+
+    const explosiveRepos = explosiveRepoItems.filter((item): item is RepoSummaryItem => item !== null).slice(0, 3);
 
     const trendObservation = Array.isArray(parsed.trendObservation)
       ? parsed.trendObservation.map((line) => line.trim()).filter(Boolean).join("\n")
@@ -302,19 +321,32 @@ export async function summarize(
   }
 
   const client = new Anthropic({ apiKey, ...(baseURL && { baseURL }) });
+  const model = process.env.ANTHROPIC_MODEL?.trim() || DEFAULT_MODEL;
+
+  return summarizeWithClient(repos, trendingRepos, client, radarContext, model);
+}
+
+export async function summarizeWithClient(
+  repos: EnrichedRepo[],
+  trendingRepos: TrendingRepo[],
+  client: AnthropicClientLike,
+  radarContext?: RadarContext,
+  model = DEFAULT_MODEL
+): Promise<ClaudeSummary> {
   const prompt = buildPrompt(repos, trendingRepos, radarContext);
 
   console.log(`[Claude] Sending ${repos.length} repos for summarization...`);
   console.log(`[Claude] Base URL: ${client.baseURL}`);
+  console.log(`[Claude] Model: ${model}`);
 
   const message = await client.messages.create({
-    model: MODEL,
+    model,
     max_tokens: 2000,
     messages: [{ role: "user", content: prompt }],
   });
 
   const raw = message.content
-    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .filter((block): block is { type: "text"; text: string } => block.type === "text" && typeof block.text === "string")
     .map((block) => block.text)
     .join("\n");
 

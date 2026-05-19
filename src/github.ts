@@ -1,10 +1,12 @@
 import type { RepoInfo, SearchGroup, SearchGroupConfig, QualityCheck } from "./types.js";
 import { buildDynamicSearchQuery } from "./radar.js";
+import { createLimiter, fetchWithRetry } from "./http.js";
 
 type SearchResultItem = { repo: RepoInfo; sources: SearchGroup[]; qualityCheck?: QualityCheck; readmeSnippet?: string };
 
 const GITHUB_API = "https://api.github.com";
 const token = process.env.GITHUB_TOKEN ?? "";
+const scheduleGitHubRequest = createLimiter(Number.parseInt(process.env.GITHUB_MAX_CONCURRENCY ?? "4", 10) || 4);
 
 const headers: Record<string, string> = {
   Accept: "application/vnd.github+json",
@@ -67,6 +69,37 @@ function buildSearchGroups(dynamicTerms: string[] = []): SearchGroupConfig[] {
   return groups;
 }
 
+async function requestGitHubResponse(url: string, label: string, init?: RequestInit): Promise<Response> {
+  return scheduleGitHubRequest(async () => {
+    const response = await fetchWithRetry(url, { ...init, headers: { ...headers, ...(init?.headers ?? {}) } }, label);
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`GitHub API error (${response.status}) for ${label}: ${body}`);
+    }
+
+    return response;
+  });
+}
+
+async function requestGitHubJson<T>(url: string, label: string, init?: RequestInit): Promise<T> {
+  const response = await requestGitHubResponse(url, label, init);
+  return (await response.json()) as T;
+}
+
+async function requestGitHubText(url: string, label: string, init?: RequestInit): Promise<string> {
+  const response = await requestGitHubResponse(url, label, init);
+  return response.text();
+}
+
+function getPagedCount(response: Response, fallbackCount: number): number {
+  const lastPageMatch = response.headers.get("link")?.match(/page=(\d+)>; rel="last"/);
+  if (lastPageMatch?.[1]) {
+    return Number.parseInt(lastPageMatch[1], 10);
+  }
+
+  return fallbackCount;
+}
+
 async function searchRepos(config: SearchGroupConfig): Promise<{ group: SearchGroup; repos: RepoInfo[] }> {
   const url = new URL(`${GITHUB_API}/search/repositories`);
   url.searchParams.set("q", config.query);
@@ -76,13 +109,7 @@ async function searchRepos(config: SearchGroupConfig): Promise<{ group: SearchGr
 
   console.log(`[Search ${config.group}] ${config.query.slice(0, 80)}...`);
 
-  const res = await fetch(url.toString(), { headers });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`GitHub Search API error (${res.status}): ${body}`);
-  }
-
-  const data = (await res.json()) as { items: RepoInfo[] };
+  const data = await requestGitHubJson<{ items: RepoInfo[] }>(url.toString(), `search group ${config.group}`);
   console.log(`[Search ${config.group}] Found ${data.items.length} repos`);
   return { group: config.group, repos: data.items };
 }
@@ -95,7 +122,6 @@ function dedupeAndFilter(
   for (const { group, repos } of groupResults) {
     for (const repo of repos) {
       if (repo.fork || repo.archived || !repo.description) continue;
-      if (repo.stargazers_count < 100) continue;
 
       const existing = repoMap.get(repo.id);
       if (existing) {
@@ -110,23 +136,23 @@ function dedupeAndFilter(
 }
 
 export async function checkQuality(repo: RepoInfo): Promise<QualityCheck> {
-  const [repoDetail, languages, commitsRes] = await Promise.all([
-    fetch(`${GITHUB_API}/repos/${repo.full_name}`, { headers }).then((r) => r.json()) as Promise<Record<string, unknown>>,
-    fetch(`${GITHUB_API}/repos/${repo.full_name}/languages`, { headers }).then((r) => r.json()) as Promise<Record<string, number>>,
-    fetch(`${GITHUB_API}/repos/${repo.full_name}/commits?per_page=1`, { headers }),
+  const [languages, commitsRes, contributorsRes] = await Promise.all([
+    requestGitHubJson<Record<string, number>>(
+      `${GITHUB_API}/repos/${repo.full_name}/languages`,
+      `languages ${repo.full_name}`
+    ),
+    requestGitHubResponse(`${GITHUB_API}/repos/${repo.full_name}/commits?per_page=1`, `commits ${repo.full_name}`),
+    requestGitHubResponse(
+      `${GITHUB_API}/repos/${repo.full_name}/contributors?per_page=1&anon=true`,
+      `contributors ${repo.full_name}`
+    ),
   ]);
 
-  const contributorsRes = await fetch(
-    `${GITHUB_API}/repos/${repo.full_name}/contributors?per_page=1&anon=true`,
-    { headers }
-  );
-  const contributorCount = parseInt(contributorsRes.headers.get("link")?.match(/page=(\d+)>; rel="last"/)?.[1] ?? "1", 10);
-
-  const commitCount = parseInt(commitsRes.headers.get("link")?.match(/page=(\d+)>; rel="last"/)?.[1] ?? "1", 10);
-
-  const lastCommitDate = commitsRes.ok
-    ? ((await commitsRes.json()) as Array<{ commit: { committer: { date: string } } }>)[0]?.commit?.committer?.date
-    : null;
+  const commits = (await commitsRes.json()) as Array<{ commit: { committer: { date: string } } }>;
+  const contributors = (await contributorsRes.json()) as Array<unknown>;
+  const contributorCount = getPagedCount(contributorsRes, contributors.length);
+  const commitCount = getPagedCount(commitsRes, commits.length);
+  const lastCommitDate = commits[0]?.commit?.committer?.date ?? null;
   const recentCommit = lastCommitDate
     ? Date.now() - new Date(lastCommitDate).getTime() < 7 * 24 * 60 * 60 * 1000
     : false;
@@ -140,65 +166,79 @@ export async function checkQuality(repo: RepoInfo): Promise<QualityCheck> {
 }
 
 async function fetchReadmeSnippet(repo: RepoInfo): Promise<string | undefined> {
-  const res = await fetch(`${GITHUB_API}/repos/${repo.full_name}/readme`, {
-    headers: {
-      ...headers,
-      Accept: "application/vnd.github.raw+json",
-    },
-  });
+  try {
+    const text = await requestGitHubText(`${GITHUB_API}/repos/${repo.full_name}/readme`, `readme ${repo.full_name}`, {
+      headers: {
+        Accept: "application/vnd.github.raw+json",
+      },
+    });
 
-  if (!res.ok) {
+    return text.replace(/[#>*_`\-\[\]\(\)!]/g, " ").replace(/\s+/g, " ").trim().slice(0, 400) || undefined;
+  } catch {
     return undefined;
   }
-
-  const text = (await res.text()).replace(/[#>*_`\-\[\]\(\)!]/g, " ").replace(/\s+/g, " ").trim();
-  return text.slice(0, 400) || undefined;
 }
 
 function passesQualityCheck(qc: QualityCheck, repo: RepoInfo): boolean {
   return (
     qc.commits >= 10 &&
     repo.size >= 100 &&
+    repo.open_issues_count > 0 &&
     repo.forks_count >= 5 &&
     qc.contributors >= 2 &&
-    qc.hasRealCode
+    qc.hasRealCode &&
+    qc.recentCommit
   );
 }
 
 export async function searchAllGroups(dynamicTerms: string[] = []): Promise<SearchResultItem[]> {
   const configs = buildSearchGroups(dynamicTerms);
 
-  const results = [];
-  for (const config of configs) {
-    results.push(await searchRepos(config));
-    await sleep(2000);
+  const settledSearches = await Promise.allSettled(configs.map((config) => searchRepos(config)));
+  const results = settledSearches.flatMap((result) => {
+    if (result.status === "fulfilled") {
+      return [result.value];
+    }
+
+    console.warn(`[Search] Skipping failed search group: ${String(result.reason)}`);
+    return [];
+  });
+
+  if (results.length === 0) {
+    throw new Error("All GitHub search groups failed");
   }
 
   const merged = dedupeAndFilter(results);
   console.log(`[Dedup] ${merged.length} unique repos after filtering`);
 
-  const output: SearchResultItem[] = [];
+  const settledRepos = await Promise.allSettled(
+    merged.map(async (item): Promise<SearchResultItem | null> => {
+      const isGroupD = item.sources.includes("D");
 
-  for (const item of merged) {
-    const isGroupD = item.sources.includes("D");
+      if (isGroupD) {
+        const [qc, readmeSnippet] = await Promise.all([checkQuality(item.repo), fetchReadmeSnippet(item.repo)]);
+        if (passesQualityCheck(qc, item.repo)) {
+          return { ...item, qualityCheck: qc, readmeSnippet };
+        }
 
-    if (isGroupD) {
-      const [qc, readmeSnippet] = await Promise.all([checkQuality(item.repo), fetchReadmeSnippet(item.repo)]);
-      if (passesQualityCheck(qc, item.repo)) {
-        output.push({ ...item, qualityCheck: qc, readmeSnippet });
-      } else {
         console.log(`[Quality] Filtered out ${item.repo.full_name} (empty/low-quality)`);
+        return null;
       }
-    } else {
+
       const readmeSnippet = await fetchReadmeSnippet(item.repo);
-      output.push({ ...item, readmeSnippet });
+      return { ...item, readmeSnippet };
+    })
+  );
+
+  const output = settledRepos.flatMap((result) => {
+    if (result.status === "fulfilled") {
+      return result.value ? [result.value] : [];
     }
-  }
+
+    console.warn(`[Repo] Skipping repo after GitHub API failure: ${String(result.reason)}`);
+    return [];
+  });
 
   console.log(`[Final] ${output.length} repos passed all filters`);
   return output;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
