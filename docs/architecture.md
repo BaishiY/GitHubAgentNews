@@ -303,7 +303,7 @@ jobs:
       - run: npm ci
       - run: npm run report
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONAL_GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
 
@@ -344,7 +344,7 @@ github-news/
 
 | Secret | 来源 | 说明 |
 |--------|------|------|
-| `GITHUB_TOKEN` | Actions 自带 | 无需额外配置 |
+| `PERSONAL_GITHUB_TOKEN` | 你创建的 GitHub PAT | GitHub Search / repo 详情请求认证 |
 | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) | Claude API 密钥 |
 | `TEAMS_WEBHOOK_URL` | Teams Workflows | Webhook 端点 URL |
 

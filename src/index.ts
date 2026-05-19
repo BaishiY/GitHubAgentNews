@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { searchAllGroups } from "./github.js";
+import { searchAllGroups, supplementCandidates } from "./github.js";
 import { loadRadarContext } from "./radar.js";
 import { enrichAndRank } from "./scorer.js";
 import { loadSnapshot, saveSnapshot } from "./snapshot.js";
@@ -34,29 +34,41 @@ async function main() {
     console.warn(`[Trending] Failed to load GitHub trending repos: ${String(error)}`);
   }
 
-  // 3. 搜索 GitHub（固定关键词 + 动态新闻主题 + 去重 + 质量校验）
-  const filtered = await searchAllGroups(radarContext?.dynamicSearchTerms ?? []);
+  // 3. 搜索 GitHub（固定关键词 + 动态新闻主题 + 去重）
+  const candidates = await searchAllGroups(radarContext?.dynamicSearchTerms ?? []);
 
-  if (filtered.length === 0) {
+  if (candidates.length === 0) {
     console.log("No repos found after filtering. Exiting.");
     return;
   }
 
-  // 4. 评分排序，取 Top 20
-  const ranked = enrichAndRank(filtered, snapshot, radarContext ?? undefined, 20);
+  // 4. 先粗排，再只补 Top 候选的 README / 质量信息
+  const preliminaryRanked = enrichAndRank(candidates, snapshot, radarContext ?? undefined, candidates.length);
+  const preliminaryMap = new Map(candidates.map((item) => [item.repo.full_name, item]));
+  const orderedCandidates = preliminaryRanked
+    .map((repo) => preliminaryMap.get(repo.full_name))
+    .filter((item): item is NonNullable<typeof item> => item !== undefined);
+  const { supplemented, droppedRepoNames } = await supplementCandidates(orderedCandidates, 15);
+
+  if (droppedRepoNames.length > 0) {
+    console.log(`[Supplement] Dropped ${droppedRepoNames.length} low-quality top candidates`);
+  }
+
+  // 5. 评分排序，取 Top 20
+  const ranked = enrichAndRank(supplemented, snapshot, radarContext ?? undefined, 20);
   console.log(`\n[Ranked] Top ${ranked.length} repos:`);
   for (const r of ranked.slice(0, 5)) {
     console.log(`  ${r.full_name} ⭐${r.stargazers_count} score=${r.score.toFixed(1)} ${r.fireLevel}`);
   }
 
-  // 5. Claude 摘要
+  // 6. Claude 摘要
   const summary = await summarize(ranked, trendingRepos, radarContext ?? undefined);
 
-  // 6. 推送到 Teams
+  // 7. 推送到 Teams
   await sendToTeams(summary, ranked, snapshot, trendingRepos, radarContext ?? undefined);
 
-  // 7. 保存今日快照
-  const allRepos = filtered.map((f) => f.repo);
+  // 8. 保存今日快照
+  const allRepos = candidates.map((f) => f.repo);
   await saveSnapshot(allRepos, snapshot);
 
   console.log("\n=== Done ===");

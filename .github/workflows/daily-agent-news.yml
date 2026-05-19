@@ -13,6 +13,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
 
       - uses: actions/setup-node@v4
         with:
@@ -23,7 +25,11 @@ jobs:
       - name: Generate and send report
         run: npm run report
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONAL_GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+          GITHUB_MAX_CONCURRENCY: '2'
+          GITHUB_SUPPLEMENT_TOP_N: '15'
+          GITHUB_SEARCH_DELAY_MIN_MS: '2000'
+          GITHUB_SEARCH_DELAY_MAX_MS: '5000'
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
